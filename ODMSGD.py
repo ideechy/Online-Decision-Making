@@ -22,9 +22,6 @@ def u(A, X, beta):
 def gu(A, X, beta):
     return(np.vstack(((1 - A) * X.T, A * X.T)))
 
-def logit(A, X, beta):
-    return(1/(1 + np.exp(-u(A, X, beta))))
-
 def LinearGenerator(n=1, X=None, A=None, generate_Y=False):
     if X is None:
         X = np.empty((n, p))
@@ -45,33 +42,16 @@ def LinearGenerator(n=1, X=None, A=None, generate_Y=False):
         Y = {'0': Y0, '1': Y1}
         return((X, A, Y))
 
-def LogisticGenerator(n=1, X=None, A=None, generate_Y=False):
-    if X is None:
-        X = np.random.normal(0, 1, n * (p - 1)).reshape(n, p - 1)
-        X = np.hstack((np.ones(n).reshape(n, 1), X))
-    else:
-        X = np.asarray(X).reshape(-1, p)
-        n = X.shape[0]
-    if not generate_Y:
-        return(X)
-    elif A is not None:
-        # if A not 0 or 1, raise error
-        # if size of A does not match X.shape[0], raise error
-        Y = np.random.binomial(1, logit(A, X, beta_true))
-        return((X, A, Y))
-    else:
-        Y0 = np.random.binomial(1, logit(0, X, beta_true))
-        Y1 = np.random.binomial(1, logit(1, X, beta_true))
-        Y = {'0': Y0, '1': Y1}
-        return((X, A, Y))
-
-def MSELoss(beta, O, return_second_moment = False):
+def MSELoss(beta, O, gradient_only = False, return_second_moment = False):
     X, A, Y = O
     n = X.shape[0]
     e = u(A, X, beta) - Y
     if not return_second_moment:
-        l = np.dot(e, e)/(2 * n)
         grad = np.dot(gu(A, X, beta), e)/n
+        if gradient_only:
+            return(grad)
+        else:
+            l = np.dot(e, e)/(2 * n)
         return((l, grad))
     else:
         gu_v = gu(A, X, beta)
@@ -79,14 +59,6 @@ def MSELoss(beta, O, return_second_moment = False):
         Sigma = grad_v.dot(grad_v.T)/n
         Hessian = gu_v.dot(gu_v.T)/n
         return((Sigma, Hessian))
-
-def CELoss(beta, O):
-    X, A, Y = O
-    mu = logit(A, X, beta)
-    n = X.shape[0]
-    l = np.mean(-Y * np.log(mu) - (1 - Y) * np.log(1 - mu))
-    grad = np.dot(gu(A, X, beta), mu - Y)/n
-    return((l, grad))
 
 class model:
     def __init__(self, mu, generator, loss, lr, eps):
@@ -104,6 +76,9 @@ class model:
         self.beta_hat_log = [] # start from step 1
         self.loss_log = []
         self.step = 0
+        # initialization for DoubleWeighting method
+        self.beta_hat_b = None
+        self.beta_bar_b = None
     
     def SGD(self, T, use_IPW = True, explore = False):
         for t in range(self.step, self.step + T):
@@ -122,10 +97,10 @@ class model:
             O = self.generator(X = X, A = A, generate_Y = True)
             # update beta_hat_t
             learning_rate = self.lr(t + 1)
-            l, grad = self.loss(self.beta_hat, O)
+            l, g = self.loss(self.beta_hat, O)
             if use_IPW:
-                grad *= (A/self.pi_hat + (1 - A)/(1 - self.pi_hat))/2
-            self.beta_hat -= learning_rate * grad
+                g *= (A/self.pi_hat + (1 - A)/(1 - self.pi_hat))/2
+            self.beta_hat -= learning_rate * g
             # update beta_bar_t
             self.beta_bar = (self.beta_hat + t * self.beta_bar)/(t + 1)
             # log
@@ -135,7 +110,6 @@ class model:
             #beta_bar_log.append(self.beta_bar.copy())
             self.loss_log.append(l)
             self.step = t + 1
-        # return()
     
     def PluginParameterVariance(self, use_IPW = True, return_SH = False):
         S_hat = np.zeros((2 * p, 2 * p))
@@ -158,6 +132,49 @@ class model:
             return(S_hat, H_hat)
         else:
             return(V_hat)
+        
+    def DoubleWeighting(self, T, B=100, explore = False):
+        if self.beta_hat_b is None:
+            self.beta_hat_b = np.zeros((B, 2 * p))
+        if self.beta_bar_b is None:
+            self.beta_bar_b = np.zeros((B, 2 * p))
+        for t in range(self.step, self.step + T):
+            # observe X_t
+            X = self.generator()
+            if explore:
+                self.pi_hat = 0.5
+            else:
+                # update pi_hat_t-1(X_t)
+                epsilon = self.eps(t)
+                d = int(self.mu(1, X, self.beta_bar) > self.mu(0, X, self.beta_bar))
+                self.pi_hat = (1 - epsilon) * d + epsilon/2
+            # sample A_t from Bernoulli pi_hat
+            A = np.random.binomial(1, self.pi_hat)
+            # observe Y_t
+            O = self.generator(X = X, A = A, generate_Y = True)
+            # calculate gradient
+            learning_rate = self.lr(t + 1)
+            W_ip = (A/self.pi_hat + (1 - A)/(1 - self.pi_hat))/2   
+            l, g = self.loss(self.beta_hat, O)
+            # update beta_hat_t
+            self.beta_hat -= learning_rate * W_ip * g
+            # update beta_bar_t
+            self.beta_bar = (self.beta_hat + t * self.beta_bar)/(t + 1)
+            # Resampling
+            W_b = np.random.exponential(size = (B, 1))
+            G = np.array([self.loss(b, O, gradient_only = True) for b in self.beta_hat_b])
+            self.beta_hat_b -= learning_rate * W_ip * W_b * G
+            self.beta_bar_b = (self.beta_hat_b + t * self.beta_bar_b)/(t + 1)
+            # log
+            self.data.append(O)
+            self.pi_log.append(self.pi_hat)
+            self.beta_hat_log.append(self.beta_hat.copy())
+            #beta_bar_log.append(self.beta_bar.copy())
+            self.loss_log.append(l)
+            self.step = t + 1
+            
+    def ResamplingParameterVariance(self):
+        return(np.cov(self.beta_bar_b, rowvar = False))
 
 def lr1(t):
     return(1 * t**(-0.9))
@@ -169,43 +186,51 @@ def eps(t):
         return(min(1, 0.1 * np.log(t)/np.sqrt(t)))
 
 LinearModel = model(mu = u, generator = LinearGenerator, loss = MSELoss,
-                   lr = lr1, eps = eps)
+                    lr = lr1, eps = eps)
 
-def MC(model, T, M):
+def MC(model, T, B, M):
     beta_bar = np.zeros((M, 2 * p))
-    beta_bar_se = np.zeros((M, 2 * p))
+    beta_bar_plugin_se = np.zeros((M, 2 * p))
+    beta_bar_resample_se = np.zeros((M, 2 * p))
     for i in range(M):
         model.Initialize()
-        model.SGD(T)
-        V_hat = model.PluginParameterVariance()
+        model.DoubleWeighting(T = T, B = B)
+        plugin_V = model.PluginParameterVariance()
+        resample_V = model.ResamplingParameterVariance()
         beta_bar[i, :] = model.beta_bar
-        beta_bar_se[i, :] = np.sqrt(np.diag(V_hat)/T)
-    avg_se = np.mean(beta_bar_se, axis = 0)
+        beta_bar_plugin_se[i, :] = np.sqrt(np.diag(plugin_V)/T)
+        beta_bar_resample_se[i, :] = np.sqrt(np.diag(resample_V))
+    plugin_se = np.mean(beta_bar_plugin_se, axis = 0)
+    resample_se = np.mean(beta_bar_resample_se, axis = 0)
     mcsd = np.std(beta_bar, axis = 0)
-    ratio = avg_se/mcsd
-    return(ratio, beta_bar, beta_bar_se)
+    return(beta_bar, mcsd, plugin_se, resample_se)
 
-def MC1(model, T):
+def MC1(model, T, B):
     np.random.seed()
     model.Initialize()
-    model.SGD(T)
-    V_hat = model.PluginParameterVariance()
-    return(model.beta_bar, np.sqrt(np.diag(V_hat)/T))
+    model.DoubleWeighting(T = T, B = B)
+    plugin_V = model.PluginParameterVariance()
+    resample_V = model.ResamplingParameterVariance()
+    beta_bar_plugin_se = np.sqrt(np.diag(plugin_V)/T)
+    beta_bar_resample_se = np.sqrt(np.diag(resample_V))
+    return(model.beta_bar, beta_bar_plugin_se, beta_bar_resample_se)
 
-def ParallelMC(model, T, M, num_procs):
+def ParallelMC(model, T, B, M, num_procs):
     pool = Pool(num_procs)
-    _MC1_ = partial(MC1, model = model, T = T)
+    _MC1_ = partial(MC1, model = model, T = T, B = B)
     experiments = [pool.apply_async(_MC1_) for _ in range(M)]
     beta_bar = [e.get()[0] for e in experiments]
-    beta_bar_se = [e.get()[1] for e in experiments]
-    avg_se = np.mean(beta_bar_se, axis = 0)
+    beta_bar_plugin_se = [e.get()[1] for e in experiments]
+    beta_bar_resample_se = [e.get()[2] for e in experiments]
+    plugin_se = np.mean(beta_bar_plugin_se, axis = 0)
+    resample_se = np.mean(beta_bar_resample_se, axis = 0)
     mcsd = np.std(beta_bar, axis = 0)
-    ratio = avg_se/mcsd
-    return(ratio, beta_bar, beta_bar_se)
+    return(beta_bar, mcsd, plugin_se, resample_se)
 
 
 if __name__ == '__main__':
     print(' ' * 27 + 'beta01 beta02 beta03 beta11 beta12 beta13')
-    for T in [1000, 10000]:
-        ratio, _, __ = ParallelMC(LinearModel, T = T, M = 200, num_procs = 8)
-        print('ASE/MCSD at step {:7}:'.format(T), np.round(ratio, 4))
+    for T in [1000, 10000, 100000]:
+        _, mcsd, plugin_se, resample_se = ParallelMC(LinearModel, T = T, B = 200, M = 200, num_procs = 16)
+        print('PSE/MCSD at step {:7}:'.format(T), np.round(plugin_se/mcsd, 4))
+        print('RSE/MCSD at step {:7}:'.format(T), np.round(resample_se/mcsd, 4))
