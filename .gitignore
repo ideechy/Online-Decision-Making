@@ -2,11 +2,3 @@
 .idea/
 __pycache__/
 *Data*
-*.pdf
-*.png
-*.npy
-*.log
-*.txt
-*.csv
-ODMSGD_*_*
-ODMSGD.ipynb
