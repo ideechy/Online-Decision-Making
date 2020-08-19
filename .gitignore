@@ -1,5 +1,11 @@
 .ipynb_checkpoints/
+.idea/
 __pycache__/
-CleanedData_2009.zip
-CleanedData_2009/
-DataPreprocess.ipynb
+*Data*
+*.pdf
+*.png
+*.npy
+*.log
+*.txt
+*.csv
+*_*_*

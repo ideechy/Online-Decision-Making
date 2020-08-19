@@ -83,6 +83,7 @@ class model:
         self.se_hat = np.zeros(2 * p)
         # initialization for value estimation
         self.val_hat = 0.
+        self.cum_val = 0.
         self.cum_Y = 0.
         self.cum_Ysq = 0.
         self.vse_hat = 0.
@@ -105,7 +106,7 @@ class model:
                     self.pi_hat = 0.5
                 else:
                     # update pi_hat_t-1(X_t)
-                    epsilon = self.eps(t)
+                    epsilon = self.eps(t + 1)
                     d = int(self.mu(1, X, self.beta_bar) > self.mu(0, X, self.beta_bar))
                     self.pi_hat = (1 - epsilon) * d + epsilon/2 
                 # sample A_t from Bernoulli pi_hat
@@ -129,6 +130,7 @@ class model:
             C = int(A == d)
             pi_C = 1 - epsilon/2
             # update value estimation
+            self.cum_val += Y
             self.cum_Y += C * Y/pi_C
             self.cum_Ysq += C * Y**2/pi_C
             self.val_hat = self.cum_Y/(t + 1)
@@ -157,7 +159,7 @@ class model:
         H_hat_inv = np.linalg.inv(H_hat)
         V_hat = np.dot(np.dot(H_hat_inv, S_hat), H_hat_inv)
         self.se_hat = np.sqrt(np.diag(V_hat)/self.step)
-        self.vse_hat = np.sqrt((self.cum_Ysq/self.step * 2/(2 - self.eps_inf) - 
+        self.vse_hat = np.sqrt((self.cum_Ysq/self.step * 2/(2 - epsilon) - 
                                 self.val_hat**2)/self.step)
         
     def BatchMeansParameterVariance(self, K=None):
@@ -182,12 +184,11 @@ class model:
         return(V_hat)
 
 def eps(t):
-    if t < 50:
-        return(1)
-    else:
-        return(0.2)
+    return 1 if t <= 50 else 0.1
         #return(min(1, 0.1 * np.log(t)/np.sqrt(t)))
         
+
+
 data = pd.read_csv("yahoo.csv")
 p = 5
 N = data.shape[0]
@@ -195,7 +196,7 @@ pointer = 0
 np.random.seed(1)
     
 YahooLogistic = model(mu = logit01, generator = RealGenerator, loss = BCELoss,
-                      eps = eps, eps_inf = 0.2, alpha = 0.5, gamma = 0.501)
+                      eps = eps, eps_inf = 0.1, alpha = 5, gamma = 0.501)
 YahooLogistic.Initialize()
 YahooLogistic.SGD(T = 500000, real_data = True)
 print('Data used: {}, data matched: {}'.format(pointer, YahooLogistic.step))

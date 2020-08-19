@@ -2,6 +2,7 @@
 # coding: utf-8
 
 import numpy as np
+import matplotlib.pyplot as plt
 from scipy.linalg import block_diag
 from multiprocessing import Pool
 from functools import partial
@@ -101,6 +102,7 @@ class model:
         self.se_hat = np.zeros(2 * p)
         # initialization for value estimation
         self.val_hat = 0.
+        self.val_hat_log = []
         self.cum_Y = 0.
         self.cum_Ysq = 0.
         self.vse_hat = 0.
@@ -117,7 +119,7 @@ class model:
                     self.pi_hat = 0.5
                 else:
                     # update pi_hat_t-1(X_t)
-                    epsilon = self.eps(t)
+                    epsilon = self.eps(t + 1)
                     d = int(self.mu(1, X, self.beta_bar) > self.mu(0, X, self.beta_bar))
                     self.pi_hat = (1 - epsilon) * d + epsilon/2 
                 # sample A_t from Bernoulli pi_hat
@@ -156,6 +158,7 @@ class model:
             self.beta_bar = (self.beta_hat + t * self.beta_bar)/(t + 1)
             # log historical info
             self.beta_bar_log.append(self.beta_bar.copy())
+            self.val_hat_log.append(self.val_hat)
             self.loss_log.append(l)
             self.step = t + 1
         S_hat = self.S_hat/self.step
@@ -173,6 +176,12 @@ def MCPlugin1(model, T):
     P_cp = np.array(np.abs(beta_true - model.beta_bar) <= 1.96 * model.se_hat, dtype=float)
     V_cp = np.array(np.abs(val_true - model.val_hat) <= 1.96 * model.vse_hat, dtype=float)
     return(model.beta_bar, model.val_hat, model.se_hat, P_cp, model.vse_hat, V_cp)
+
+def MCPluginSeq1(model, T):
+    np.random.seed()
+    model.Initialize()
+    model.SGD(T = T)
+    return(model.beta_bar_log[1:], model.val_hat_log)
 
 def ParallelMCPlugin(model, T, M, num_procs):
     pool = Pool(num_procs)
@@ -192,11 +201,22 @@ def ParallelMCPlugin(model, T, M, num_procs):
     V_cp = np.mean(V_cp_log, axis = 0)
     return(beta_bar, val_hat, P_mcsd, P_se, P_cp, V_mcsd, V_se, V_cp)
 
+def ParallelMCPluginSeq(model, T, M, num_procs):
+    pool = Pool(num_procs)
+    _MCPluginSeq1_ = partial(MCPluginSeq1, model = model, T = T)
+    experiments = [pool.apply_async(_MCPluginSeq1_) for _ in range(M)]
+    beta_bar = [e.get()[0] for e in experiments]
+    val_hat = [e.get()[1] for e in experiments]
+    beta_bar_m = np.mean(beta_bar, axis = 0)
+    beta_bar_u = np.quantile(beta_bar, q = 0.975, axis = 0)
+    beta_bar_l = np.quantile(beta_bar, q = 0.025, axis = 0)
+    val_hat_m = np.mean(val_hat, axis = 0)
+    val_hat_u = np.quantile(val_hat, q = 0.975, axis = 0)
+    val_hat_l = np.quantile(val_hat, q = 0.025, axis = 0)
+    return(beta_bar_m, beta_bar_u, beta_bar_l, val_hat_m, val_hat_u, val_hat_l)
+
 def eps(t):
-    if t < 50:
-        return(1)
-    else:
-        return(0.2)
+    return 1 if t <= 50 else max(t**(-0.3), 0.1)
 
 def lr(t):
     return(0.5 * t**(-0.501))
@@ -206,7 +226,7 @@ X, _ = LogisticGenerator01(N)
 A = np.random.binomial(1, 0.5, N)
 O = LogisticGenerator01(N, X, A, True)
 _, H = BCELoss(beta_true, O, return_second_moment=True)
-epsilon = 0.2
+epsilon = 0.1
 mu0 = logit01(0, X, beta_true)
 mu1 = logit01(1, X, beta_true)
 d = np.array(mu1 > mu0, dtype = float)
@@ -220,10 +240,36 @@ VV = val_true * 2/(2 - epsilon) - val_true**2
 
 if __name__ == '__main__':
     LogisticModel01 = model(mu = logit01, generator = LogisticGenerator01, loss = BCELoss,
-                            eps = eps, eps_inf = 0.2, lr = lr, alpha = 0.5, gamma = 0.501)
-    print(' ' * 25 + '[beta01 beta02 beta03 beta11 beta12 beta13]  value')
-    np.set_printoptions(formatter={'float': '{:0.4f}'.format})
+                            eps = eps, eps_inf = epsilon, lr = lr, alpha = 0.5, gamma = 0.501)
+    print(' ' * 25 + '[bet01 bet02 bet03 bet11 bet12 bet13] value')
+    np.set_printoptions(formatter={'float': '{:0.3f}'.format})
     for T in [1000, 10000, 100000]:
         beta_bar, val_hat, P_mcsd, P_se, P_cp, V_mcsd, V_se, V_cp = ParallelMCPlugin(LogisticModel01, T = T, M = 5000, num_procs = 16)
-        print('ASE/MCSD at step {:6}:'.format(T), P_se/P_mcsd, '{:0.4f}'.format(V_se/V_mcsd))
-        print('CvrgProb at step {:6}:'.format(T), P_cp, '{:0.4f}'.format(V_cp))
+        print('ASE/MCSD at step {:6}:'.format(T), P_se/P_mcsd, '{:0.3f}'.format(V_se/V_mcsd))
+        print('CvrgProb at step {:6}:'.format(T), P_cp, '{:0.3f}'.format(V_cp))
+        print('AvgCILen at step {:6}:'.format(T), 3.92 * P_se, '{:0.3f}'.format(3.92 * V_cp))
+    
+#    LogisticModel01 = model(mu = logit01, generator = LogisticGenerator01, loss = BCELoss,
+#                            eps = eps, eps_inf = 0.2, lr = lr, alpha = 0.5, gamma = 0.501)
+#    T = 10000 # not enough memory to run on local pc
+#    beta_bar_m, beta_bar_u, beta_bar_l, val_hat_m, val_hat_u, val_hat_l = ParallelMCPluginSeq(LogisticModel01, T = T, M = 5000, num_procs = 8)
+        
+#    prop_cycle = plt.rcParams['axes.prop_cycle']
+#    colors = prop_cycle.by_key()['color']
+
+#    f, (ax1,ax2) = plt.subplots(1, 2, figsize=(8,4), constrained_layout=True)
+
+#    for i in range(2 * p):
+#        ax1.plot(beta_bar_m[:, i], lw = 1, color = colors[i])
+#        ax1.fill_between(np.arange(T), beta_bar_l[:, i], beta_bar_u[:, i], color = colors[i], alpha = 0.4)
+#        ax1.scatter(T * 1.05, beta_true[i], color = colors[i])
+#        ax1.set_xlabel("decision steps")
+#        ax1.set_ylabel("parameter")
+
+#    ax2.plot(val_hat_m, lw = 1, color = colors[0])
+#    ax2.fill_between(np.arange(T), val_hat_l, val_hat_u, color = colors[0], alpha = 0.4)
+#    ax2.scatter(T * 1.05, val_true, color = colors[0])
+#    ax2.set_xlabel("decision steps")
+#    ax2.set_ylabel("value")
+
+#    plt.savefig("logistic.pdf")
